@@ -7,7 +7,7 @@
 # torchrun --standalone --nproc-per-node 4 generate.py
 
 # use inference.sh "Your Question Here?" to run inference with a single prompt.
-
+import os
 import sys
 from dataclasses import dataclass
 
@@ -354,6 +354,8 @@ def generate_with_cuda_graph(
 
 if __name__ == "__main__":
     # Get user prompt from command line arguments
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
     user_prompt = "What is 2+2?"  # Default prompt
     if len(sys.argv) > 1:
         user_prompt = sys.argv[1]
