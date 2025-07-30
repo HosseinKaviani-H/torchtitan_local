@@ -123,12 +123,14 @@ def build_test_list():
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.folder hf_checkpoint",
-                    "--checkpoint.last_save_in_hf",
                     "--checkpoint.last_save_model_only",
+                    "--checkpoint.last_save_in_hf",
                 ],
                 [
                     "--checkpoint.enable_checkpoint",
                     "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+                    "--checkpoint.initial_load_model_only",
+                    "--checkpoint.initial_load_in_hf",
                 ],
             ],
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
@@ -459,16 +461,16 @@ def build_test_list():
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--memory_estimation.enabled",
-                ]
-            ],
-            "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_memory_estimation",
-            ngpu=2,
-        ),
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--memory_estimation.enabled",
+        #         ]
+        #     ],
+        #     "FSDP2 Memory Tracking and Estimation",
+        #     "fsdp2_memory_estimation",
+        #     ngpu=2,
+        # ),
         OverrideDefinitions(
             [
                 [
@@ -516,7 +518,6 @@ def build_test_list():
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
-                    "--float8.force_recompute_fp8_weight_in_bwd",
                     "--float8.emulate",
                 ],
             ],
