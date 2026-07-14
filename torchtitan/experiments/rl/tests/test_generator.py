@@ -288,6 +288,31 @@ def test_reset_running_requests_requires_prefix_cache_reset():
         )
 
 
+def test_expert_parallel_degree_must_be_one_or_full_ep():
+    # vLLM forms the EP group from ALL DP*TP ranks, so ep must be 1 (disabled) or
+    # equal data_parallel_degree * tensor_parallel_degree. dp*tp = 1 here, ep=2.
+    with pytest.raises(ValueError, match="expert_parallel_degree"):
+        VLLMGenerator.Config(
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=1,
+                expert_parallel_degree=2,
+            )
+        )
+
+
+def test_full_expert_parallel_degree_is_allowed():
+    # dp*tp = 4 and ep = 4 (full EP) is accepted.
+    config = VLLMGenerator.Config(
+        parallelism=InferenceParallelismConfig(
+            data_parallel_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=4,
+        )
+    )
+    assert config.parallelism.expert_parallel_degree == 4
+
+
 def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
     import dataclasses
@@ -357,3 +382,86 @@ def test_cudagraph_full_mode_extends_capture_sizes_to_chunk():
 def test_cudagraph_rejects_nonpositive_max_num_seqs():
     with pytest.raises(ValueError, match="max_num_seqs must be positive"):
         VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(max_num_seqs=0)
+
+
+# --- n=1 contract on finished outputs ---
+
+
+def test_build_completions_rejects_multiple_samples_per_request():
+    # We always submit n=1, so a finished RequestOutput must carry exactly one
+    # CompletionOutput; more than one is a contract violation.
+    dispatcher = _dispatcher()
+    with pytest.raises(ValueError, match="expected n=1"):
+        dispatcher.process_finished_requests(
+            [_request_output(outputs=[_sample(), _sample()])], policy_version=7
+        )
+
+
+# --- min (admitted) policy-version stamping (rank 0) ---
+
+
+def test_rank0_stamp_min_policy_version_marks_every_future_in_the_decision():
+    async def main():
+        # DP=2: rank 0 owns all futures regardless of which DP rank serves them, so
+        # it stamps the admitted (sampling) version on every future in the STEP decision.
+        dispatcher = _dispatcher(dp_degree=2)
+        for request_id in ("a", "b", "c"):
+            future = asyncio.get_running_loop().create_future()
+            dispatcher._rank0_generation_futures[request_id] = GenerationFuture(
+                future=future, metrics_prefix="generator"
+            )
+        requests_per_dp_rank = [
+            [SimpleNamespace(request_id="a"), SimpleNamespace(request_id="b")],
+            [SimpleNamespace(request_id="c")],
+        ]
+        dispatcher.rank0_stamp_min_policy_version(requests_per_dp_rank, policy_version=5)
+        assert all(
+            gf.min_policy_version == 5
+            for gf in dispatcher._rank0_generation_futures.values()
+        )
+
+    asyncio.run(main())
+
+
+# --- DP>1 result fan-in: a peer DP leader sends completions over the port ---
+
+
+class _FakePort:
+    """Stands in for a Monarch send Port; records what a peer DP leader sends."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, completions):
+        self.sent.append(completions)
+
+
+def test_peer_dp_leader_sends_completions_over_the_port():
+    # Rank 1 = (dp_rank=1, tp_rank=0) with DP=2, TP=1: it is a peer DP leader, so it
+    # holds no futures and ships finished completions to global rank 0 over the port
+    # instead of resolving locally.
+    dispatcher = _dispatcher(rank=1, dp_degree=2, tp_degree=1)
+    assert dispatcher._rank != 0 and dispatcher._tp_rank == 0
+    port = _FakePort()
+    dispatcher._result_port = port
+
+    dispatcher.process_finished_requests(
+        [_request_output(request_id="r0", outputs=[_sample(token_ids=(10, 11))])],
+        policy_version=9,
+    )
+
+    assert len(port.sent) == 1
+    [(request_id, completion, _metrics_inputs)] = port.sent[0]
+    assert request_id == "r0"
+    assert completion.token_ids == [10, 11]
+    # Peer leaders never resolve futures themselves.
+    assert dispatcher._rank0_generation_futures == {}
+
+
+def test_peer_dp_leader_sends_nothing_when_no_requests_finished():
+    # No finished outputs -> no send (avoids an empty port message every step).
+    dispatcher = _dispatcher(rank=1, dp_degree=2, tp_degree=1)
+    port = _FakePort()
+    dispatcher._result_port = port
+    dispatcher.process_finished_requests([], policy_version=9)
+    assert port.sent == []

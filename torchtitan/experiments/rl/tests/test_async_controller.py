@@ -208,3 +208,37 @@ def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
             min_policy_versions=[0],
             max_offpolicy_steps=3,
         )
+
+
+def test_offpolicy_window_caps_active_slots_and_release_unblocks() -> None:
+    # The buffer's active-slot budget is the off-policy window:
+    #   max_active = (max_offpolicy_steps + 1) * num_groups_per_train_step.
+    # Exactly that many slots are grantable; the next waiter blocks until a train
+    # step releases its share, bounding how far generation runs ahead.
+    async def run() -> None:
+        max_offpolicy_steps = 2
+        num_groups_per_train_step = 2
+        max_active = (max_offpolicy_steps + 1) * num_groups_per_train_step  # 6
+
+        buffer = RolloutGroupWorkBuffer.Config().build(
+            max_active_rollout_groups=max_active
+        )
+        # Fill the whole window.
+        for group_id in range(max_active):
+            assert await buffer.wait_for_slot()
+            await buffer.add_work(RolloutGroupWork(group_id=group_id, sample=object()))
+
+        # The (max_active + 1)th acquisition blocks: generation cannot outrun the window.
+        waiter = asyncio.create_task(buffer.wait_for_slot())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        # A completed train step releases its groups; a blocked producer proceeds.
+        await buffer.release_active_groups(
+            num_groups_per_train_step, reason="trained"
+        )
+        assert await waiter
+
+        await buffer.close()
+
+    asyncio.run(run())
